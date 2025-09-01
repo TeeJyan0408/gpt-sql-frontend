@@ -90,6 +90,9 @@ const toNumber = (v) => {
   return NaN;
 };
 
+// Simple number guard used by formatters/components
+const isNumber = (v) => typeof v === 'number' && Number.isFinite(v);
+
 // Pretty number formatting (2 decimals max)
 const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 const formatNumber = (n) => {
