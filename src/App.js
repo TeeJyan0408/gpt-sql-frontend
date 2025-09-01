@@ -1,7 +1,7 @@
-// src/App.js — v1.8.0
-// Patches: Responsive charts, attempted SQL on error, UI action fallback note,
-// CSV safety checks + uploading state, configurable API_BASE, robust month sort,
-// disable input while loading, wider container, table scroll, **login modal & auth headers**.
+// src/App.js — v1.8.1
+// Patches on v1.8.0: number formatting for table/axes/tooltips,
+// safer chart axis resolution & try/catch guard (prevents black screen),
+// ErrorBoundary wrapper, keep login modal & auth headers, CSV upload, etc.
 
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
@@ -90,6 +90,13 @@ const toNumber = (v) => {
   return NaN;
 };
 
+// Pretty number formatting (2 decimals max)
+const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+const formatNumber = (n) => {
+  const x = toNumber(n);
+  return Number.isFinite(x) ? nf.format(x) : String(n);
+};
+
 const MONTHS3 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const fullTo3 = (m) => {
   const idx = ['January','February','March','April','May','June','July','August','September','October','November','December']
@@ -167,23 +174,14 @@ function pivotData(rows, xKey, seriesKey, yKey) {
   const xSet = new Set();
   const seriesSet = new Set();
   const map = new Map();
-
   rows.forEach(r => {
-    const rawX = r?.[xKey];
-    const rawS = r?.[seriesKey];
-
-    // Guard/normalize keys
-    const x = (rawX == null || rawX === '') ? 'Unknown' : String(rawX);
-    const s = (rawS == null || rawS === '') ? 'Unknown' : String(rawS);
-
-    const v = toNumber(r?.[yKey]);
+    const x = r[xKey];
+    const s = r[seriesKey];
+    const v = toNumber(r[yKey]);
     if (!map.has(x)) map.set(x, { [xKey]: x });
     map.get(x)[s] = Number.isFinite(v) ? v : 0;
-
-    xSet.add(x);
-    seriesSet.add(s);
+    xSet.add(x); seriesSet.add(s);
   });
-
   const xs = Array.from(xSet);
   xs.sort((a, b) => {
     const ia = monthIndex(String(a));
@@ -193,10 +191,8 @@ function pivotData(rows, xKey, seriesKey, yKey) {
     if (Number.isFinite(ib)) return 1;
     return String(a).localeCompare(String(b));
   });
-
   return { data: xs.map(x => map.get(x)), series: Array.from(seriesSet) };
 }
-
 
 /* ───────── Feedback UI ───────── */
 function FeedbackButtons({ disabled, onUp, onDown }) {
@@ -366,6 +362,32 @@ function UploadCSV({ onUploaded, onRequireLogin }) {
       )}
     </div>
   );
+}
+
+/* ───────── Error Boundary (prevents black screens) ───────── */
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    // eslint-disable-next-line no-console
+    console.error('UI ErrorBoundary caught:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="p-4 m-4 rounded-lg border border-red-300 bg-red-50 text-red-700 dark:bg-red-900/20 dark:border-red-800 dark:text-red-300">
+          <div className="font-semibold mb-1">Something went wrong while rendering.</div>
+          <div className="text-sm break-all">{String(this.state.error)}</div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 /* ───────── App ───────── */
@@ -616,127 +638,137 @@ export default function App() {
 
   /* ───────── Chart Renderer ───────── */
   const renderChart = (data, xKey, yKey, type, color, xLabel, yLabel) => {
-    const { xKey: rx, seriesKey, yKey: ry, isMulti } = resolveAxes(data);
-    // Fast guard: if we couldn't resolve keys, avoid crashing the UI.
-    if (!rx || !ry) {
-      return <div className="text-sm text-red-600">Unable to resolve chart axes from the result.</div>;
-    }
+    try {
+      const { xKey: rx, seriesKey, yKey: ry, isMulti } = resolveAxes(data);
 
-    if (isMulti) {
-      const { data: wide, series } = pivotData(data, rx, seriesKey, ry);
-      const sampleX = wide.map(row => row[rx]);
-      const timeLike = isTimeLikeAxis(rx, sampleX);
+      // Use explicit keys when provided, otherwise the auto-resolved ones
+      const ex = xKey || rx;
+      const ey = yKey || ry;
 
-      // Prefer grouped BAR for time multi-series unless explicitly asked for a line
-      if (timeLike && type !== 'line') {
+      // Guard AFTER fallback
+      if (!ex || !ey) {
+        return <div className="text-sm text-red-600">Unable to resolve chart axes from the result.</div>;
+      }
+
+      if (isMulti) {
+        const { data: wide, series } = pivotData(data, ex, seriesKey, ey);
+        const sampleX = wide.map(row => row[ex]);
+        const timeLike = isTimeLikeAxis(ex, sampleX);
+
+        // Prefer grouped BAR for time multi-series unless explicitly asked for a line
+        if (timeLike && type !== 'line') {
+          return (
+            <ResponsiveContainer width="100%" height={360}>
+              <BarChart data={wide} margin={{ bottom: 48, left: 56, right: 16, top: 8 }}>
+                <XAxis
+                  dataKey={ex}
+                  angle={-30}
+                  textAnchor="end"
+                  interval={0}
+                  height={70}
+                  tick={{ fontSize: 12 }}
+                  label={xLabel ? { value: xLabel, position: 'insideBottom', offset: -36 } : undefined}
+                />
+                <YAxis tickMargin={8} width={80} tickFormatter={formatNumber}
+                       label={yLabel ? { value: yLabel, angle: -90, position: 'left', dx: -12 } : undefined} />
+                <Tooltip formatter={(v) => formatNumber(v)} />
+                {series.map((s, i) => (
+                  <Bar key={String(s)} dataKey={String(s)} fill={COLORS[i % COLORS.length]} />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          );
+        }
+
+        // Explicit line
+        if (timeLike && type === 'line') {
+          return (
+            <ResponsiveContainer width="100%" height={360}>
+              <LineChart data={wide} margin={{ bottom: 64, left: 64, right: 24, top: 8 }}>
+                <XAxis dataKey={ex} angle={-30} textAnchor="end" interval={0} height={70}
+                       tick={{ fontSize: 12 }}
+                       label={xLabel ? { value: xLabel, position: 'insideBottom', offset: -36 } : undefined} />
+                <YAxis tickMargin={8} width={80} tickFormatter={formatNumber}
+                       label={yLabel ? { value: yLabel, angle: -90, position: 'left', dx: -10 } : undefined} />
+                <Tooltip formatter={(v) => formatNumber(v)} />
+                {series.map((s, i) => (
+                  <Line key={String(s)} type="monotone" dataKey={String(s)} stroke={COLORS[i % COLORS.length]} strokeWidth={2} />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          );
+        }
+
+        // Categorical multi-series → grouped bars
         return (
           <ResponsiveContainer width="100%" height={360}>
             <BarChart data={wide} margin={{ bottom: 48, left: 56, right: 16, top: 8 }}>
-              <XAxis
-                dataKey={rx}
-                angle={-30}
-                textAnchor="end"
-                interval={0}
-                height={70}
-                tick={{ fontSize: 12 }}
-                label={xLabel ? { value: xLabel, position: 'insideBottom', offset: -36 } : undefined}
-             />                     
-              <YAxis tickMargin={8} width={80}
-                      label={yLabel ? { value: yLabel, angle: -90, position: 'left', dx: -12 } : undefined} />
-              <Tooltip />
-              {series.map((s, i) => (
-                <Bar key={s} dataKey={s} fill={COLORS[i % COLORS.length]} />
-              ))}
-            </BarChart>
-          </ResponsiveContainer>
-        );
-      }
-
-      // Explicit line
-      if (timeLike && type === 'line') {
-        return (
-          <ResponsiveContainer width="100%" height={360}>
-            <LineChart data={wide} margin={{ bottom: 64, left: 64, right: 24, top: 8 }}>
-              <XAxis dataKey={rx} angle={-30} textAnchor="end" interval={0} height={70}
-              tick={{ fontSize: 12 }}
-              label={xLabel ? { value: xLabel, position: 'insideBottom', offset: -36 } : undefined} />
-              <YAxis tickMargin={8} width={80}
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey={ex} angle={-20} textAnchor="end" interval={0}
+                     label={xLabel ? { value: xLabel, position: 'insideBottom', offset: -28 } : undefined} />
+              <YAxis tickMargin={8} tickFormatter={formatNumber}
                      label={yLabel ? { value: yLabel, angle: -90, position: 'left', dx: -10 } : undefined} />
-              <Tooltip />
+              <Tooltip formatter={(v) => formatNumber(v)} />
               {series.map((s, i) => (
-                <Line key={s} type="monotone" dataKey={s} stroke={COLORS[i % COLORS.length]} strokeWidth={2} />
+                <Bar key={String(s)} dataKey={String(s)} fill={COLORS[i % COLORS.length]} />
               ))}
-            </LineChart>
+            </BarChart>
           </ResponsiveContainer>
         );
       }
 
-      // Categorical multi-series → grouped bars
-      return (
-        <ResponsiveContainer width="100%" height={360}>
-          <BarChart data={wide} margin={{ bottom: 48, left: 56, right: 16, top: 8 }}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={rx} angle={-20} textAnchor="end" interval={0}
-                   label={xLabel ? { value: xLabel, position: 'insideBottom', offset: -28 } : undefined} />
-            <YAxis tickMargin={8}
-                   label={yLabel ? { value: yLabel, angle: -90, position: 'left', dx: -10 } : undefined} />
-            <Tooltip />
-            {series.map((s, i) => (
-              <Bar key={s} dataKey={s} fill={COLORS[i % COLORS.length]} />
-            ))}
-          </BarChart>
-        </ResponsiveContainer>
-      );
-    }
-
-    // Single-series
-    const ex = xKey || rx, ey = yKey || ry;
-    // Fast guard: if we couldn't resolve keys, avoid crashing the UI.
-    if (!ex || !ey) {
-      return <div className="text-sm text-red-600">Chart columns not detected.</div>;
-    }
-
-
-    switch (type) {
-      case 'bar':
-        return (
-          <ResponsiveContainer width="100%" height={360}>
-            <BarChart data={data} margin={{ bottom: 48, left: 56, right: 16, top: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey={ex} angle={-30} textAnchor="end" interval={0} />
-              <YAxis />
-              <Tooltip />
-              <Bar dataKey={ey} fill={color} />
-            </BarChart>
-          </ResponsiveContainer>
-
-        );
-      case 'line':
-        return (
-          <ResponsiveContainer width="100%" height={360}>
-            <LineChart data={data} margin={{ bottom: 48, left: 56, right: 16, top: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey={ex} angle={-30} textAnchor="end" interval={0} />
-              <YAxis />
-              <Tooltip />
-              <Line type="monotone" dataKey={ey} stroke={color} strokeWidth={2} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        );
-
-      case 'pie':
-        return (
-          <ResponsiveContainer width="100%" height={360}>
-            <PieChart>
-              <Pie data={data} dataKey={ey} nameKey={ex} cx="50%" cy="50%" outerRadius={80} label>
-                {data.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
-              </Pie>
-              <Tooltip />
-            </PieChart>
-         </ResponsiveContainer>
-        );
-      default:
-        return null;
+      // Single-series
+      switch (type) {
+        case 'bar':
+          return (
+            <ResponsiveContainer width="100%" height={360}>
+              <BarChart data={data} margin={{ bottom: 48, left: 56, right: 16, top: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey={ex} angle={-30} textAnchor="end" interval={0} />
+                <YAxis tickFormatter={formatNumber} />
+                <Tooltip formatter={(v) => formatNumber(v)} />
+                <Bar dataKey={ey} fill={color} />
+              </BarChart>
+            </ResponsiveContainer>
+          );
+        case 'line':
+          return (
+            <ResponsiveContainer width="100%" height={360}>
+              <LineChart data={data} margin={{ bottom: 48, left: 56, right: 16, top: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey={ex} angle={-30} textAnchor="end" interval={0} />
+                <YAxis tickFormatter={formatNumber} />
+                <Tooltip formatter={(v) => formatNumber(v)} />
+                <Line dataKey={ey} stroke={color} strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          );
+        case 'pie':
+          return (
+            <ResponsiveContainer width="100%" height={360}>
+              <PieChart>
+                <Pie
+                  data={data}
+                  dataKey={ey}
+                  nameKey={ex}
+                  cx="50%"
+                  cy="50%"
+                  outerRadius={80}
+                  label={(e) => `${e.name}: ${formatNumber(e.value)}`}
+                >
+                  {data.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
+                </Pie>
+                <Tooltip formatter={(v) => formatNumber(v)} />
+              </PieChart>
+           </ResponsiveContainer>
+          );
+        default:
+          return null;
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('Chart render error:', e);
+      return <div className="text-sm text-red-600">Chart failed to render. Check console for details.</div>;
     }
   };
 
@@ -745,316 +777,317 @@ export default function App() {
   );
 
   return (
-    <div className="min-h-screen bg-gray-100 p-0 flex dark:bg-gray-900">
-      {/* Sidebar: History */}
-      <aside className="w-72 max-w-72 bg-white border-r border-gray-200 p-4 hidden md:flex md:flex-col gap-3
-                        dark:bg-gray-900 dark:border-gray-800">
-        <div className="text-lg font-semibold dark:text-gray-100">History ({selectedDb})</div>
-        <input
-          type="text"
-          value={historySearch}
-          onChange={(e) => setHistorySearch(e.target.value)}
-          placeholder="Search queries…"
-          className="border border-gray-300 rounded px-3 py-2 text-sm
-                     bg-white text-gray-900
-                     dark:bg-gray-800 dark:border-gray-700 dark:text-gray-100"
-        />
-        <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-          <span>{filteredHistory.length} items</span>
-          <button onClick={clearHistory} className="text-red-600 hover:underline">Clear All</button>
-        </div>
-
-        <div className="overflow-y-auto flex-1 pr-1">
-          {filteredHistory.length === 0 ? (
-            <div className="text-xs text-gray-500 mt-4 dark:text-gray-400">No history yet.</div>
-          ) : (
-            filteredHistory.map(h => (
-              <div key={h.id} className="group border border-gray-200 rounded-md p-2 mb-2 hover:bg-gray-50
-                                         dark:border-gray-800 dark:hover:bg-gray-800">
-                <button
-                  className="text-left text-sm font-medium text-gray-800 w-[85%] truncate
-                             dark:text-gray-100"
-                  title={h.text}
-                  onClick={() => rerunQuery(h.text)}
-                >
-                  {h.text}
-                </button>
-                <div className="flex items-center justify-between mt-1">
-                  <span className="text-[11px] text-gray-400">{new Date(h.ts).toLocaleString()}</span>
-                  <button className="text-[11px] text-red-600 opacity-0 group-hover:opacity-100" onClick={() => deleteHistoryItem(h.id)}>
-                    delete
-                  </button>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </aside>
-
-      {/* Main */}
-      <main className="flex-1 p-6 flex flex-col items-stretch">
-        <div className="w-full max-w-[1400px] bg-white rounded-2xl shadow p-6 space-y-4 dark:bg-gray-900 dark:shadow-none mx-auto">
-          <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold dark:text-gray-100">🧠 GPT-to-SQL Assistant</h1>
-            <div className="flex items-center gap-2">
-              {/* DB selector */}
-              <select
-                value={selectedDb}
-                onChange={(e) => setSelectedDb(e.target.value)}
-                className="text-xs px-2 py-1 rounded border bg-gray-100 hover:bg-gray-200 border-gray-300
-                           dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-700 dark:text-gray-100"
-                title="Select database"
-              >
-                {databases.map(db => <option key={db} value={db}>{db}</option>)}
-              </select>
-
-              {/* Auth controls (NEW) */}
-              {selectedDb.toLowerCase() !== 'demo' ? (
-                getToken() ? (
-                  <button
-                    onClick={() => { localStorage.removeItem('auth_token_v180'); setShowLogin(true); }}
-                    className="text-xs px-3 py-1 rounded border bg-gray-100 hover:bg-gray-200 border-gray-300
-                               dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-700 dark:text-gray-100">
-                    Re-login
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => setShowLogin(true)}
-                    className="text-xs px-3 py-1 rounded border bg-gray-100 hover:bg-gray-200 border-gray-300
-                               dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-700 dark:text-gray-100">
-                    Login
-                  </button>
-                )
-              ) : null}
-
-              {/* CSV Upload (NEW) */}
-              <UploadCSV onUploaded={handleUploadedTenant} onRequireLogin={() => setShowLogin(true)} />
-
-              <span className={`text-xs px-2 py-1 rounded ${speech.isRecording ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`}>
-                {speech.supported ? (speech.isRecording ? 'Listening…' : 'Voice ready') : 'Voice N/A'}
-              </span>
-              <button
-                type="button"
-                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                className="text-xs px-3 py-1 rounded border bg-gray-100 hover:bg-gray-200 border-gray-300
-                           dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-700 dark:text-gray-100"
-              >
-                {theme === 'dark' ? 'Light' : 'Dark'}
-              </button>
-              <button
-                type="button"
-                onClick={toggleMetrics}
-                className="text-xs px-3 py-1 rounded border bg-gray-100 hover:bg-gray-200 border-gray-300
-                           dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-700 dark:text-gray-100"
-              >
-                {showMetrics ? 'Hide Metrics' : 'Show Metrics'}
-              </button>
-            </div>
+    <ErrorBoundary>
+      <div className="min-h-screen bg-gray-100 p-0 flex dark:bg-gray-900">
+        {/* Sidebar: History */}
+        <aside className="w-72 max-w-72 bg-white border-r border-gray-200 p-4 hidden md:flex md:flex-col gap-3
+                          dark:bg-gray-900 dark:border-gray-800">
+          <div className="text-lg font-semibold dark:text-gray-100">History ({selectedDb})</div>
+          <input
+            type="text"
+            value={historySearch}
+            onChange={(e) => setHistorySearch(e.target.value)}
+            placeholder="Search queries…"
+            className="border border-gray-300 rounded px-3 py-2 text-sm
+                       bg-white text-gray-900
+                       dark:bg-gray-800 dark:border-gray-700 dark:text-gray-100"
+          />
+          <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+            <span>{filteredHistory.length} items</span>
+            <button onClick={clearHistory} className="text-red-600 hover:underline">Clear All</button>
           </div>
 
-          {/* Metrics widget */}
-          {showMetrics && (
-            <div className="rounded-xl border border-gray-200 p-4 bg-gray-50 dark:bg-gray-800 dark:border-gray-700">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-lg font-semibold dark:text-gray-100">Metrics</h2>
-                {metricsLoading && <span className="text-xs text-gray-500 dark:text-gray-400">Loading…</span>}
-              </div>
-              {metricsError ? (
-                <div className="text-sm text-red-600">{metricsError}</div>
-              ) : !metrics ? (
-                <div className="text-sm text-gray-600 dark:text-gray-300">No data yet. Click “Show Metrics”.</div>
-              ) : (
-                <>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    <Stat title="Total events" value={metrics.total_events} />
-                    <Stat title="SQL attempts" value={metrics.sql_attempts} />
-                    <Stat title="SQL success" value={metrics.sql_success} />
-                    <Stat title="Success rate" value={`${metrics.sql_success_rate_pct}%`} />
+          <div className="overflow-y-auto flex-1 pr-1">
+            {filteredHistory.length === 0 ? (
+              <div className="text-xs text-gray-500 mt-4 dark:text-gray-400">No history yet.</div>
+            ) : (
+              filteredHistory.map(h => (
+                <div key={h.id} className="group border border-gray-200 rounded-md p-2 mb-2 hover:bg-gray-50
+                                           dark:border-gray-800 dark:hover:bg-gray-800">
+                  <button
+                    className="text-left text-sm font-medium text-gray-800 w-[85%] truncate
+                               dark:text-gray-100"
+                    title={h.text}
+                    onClick={() => rerunQuery(h.text)}
+                  >
+                    {h.text}
+                  </button>
+                  <div className="flex items-center justify-between mt-1">
+                    <span className="text-[11px] text-gray-400">{new Date(h.ts).toLocaleString()}</span>
+                    <button className="text-[11px] text-red-600 opacity-0 group-hover:opacity-100" onClick={() => deleteHistoryItem(h.id)}>
+                      delete
+                    </button>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-                    <Stat title="Avg exec time (success)" value={metrics.avg_exec_ms_success == null ? '—' : `${Math.round(metrics.avg_exec_ms_success)} ms`} />
-                    <div className="rounded-lg p-3 bg-white border border-gray-200 dark:bg-gray-900 dark:border-gray-700">
-                      <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">Type breakdown</div>
-                      {metrics.type_breakdown && Object.keys(metrics.type_breakdown).length ? (
+                </div>
+              ))
+            )}
+          </div>
+        </aside>
+
+        {/* Main */}
+        <main className="flex-1 p-6 flex flex-col items-stretch">
+          <div className="w-full max-w-[1400px] bg-white rounded-2xl shadow p-6 space-y-4 dark:bg-gray-900 dark:shadow-none mx-auto">
+            <div className="flex items-center justify-between">
+              <h1 className="text-2xl font-bold dark:text-gray-100">🧠 GPT-to-SQL Assistant</h1>
+              <div className="flex items-center gap-2">
+                {/* DB selector */}
+                <select
+                  value={selectedDb}
+                  onChange={(e) => setSelectedDb(e.target.value)}
+                  className="text-xs px-2 py-1 rounded border bg-gray-100 hover:bg-gray-200 border-gray-300
+                             dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-700 dark:text-gray-100"
+                  title="Select database"
+                >
+                  {databases.map(db => <option key={db} value={db}>{db}</option>)}
+                </select>
+
+                {/* Auth controls (NEW) */}
+                {selectedDb.toLowerCase() !== 'demo' ? (
+                  getToken() ? (
+                    <button
+                      onClick={() => { localStorage.removeItem('auth_token_v180'); setShowLogin(true); }}
+                      className="text-xs px-3 py-1 rounded border bg-gray-100 hover:bg-gray-200 border-gray-300
+                                 dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-700 dark:text-gray-100">
+                      Re-login
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => setShowLogin(true)}
+                      className="text-xs px-3 py-1 rounded border bg-gray-100 hover:bg-gray-200 border-gray-300
+                                 dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-700 dark:text-gray-100">
+                      Login
+                    </button>
+                  )
+                ) : null}
+
+                {/* CSV Upload (NEW) */}
+                <UploadCSV onUploaded={handleUploadedTenant} onRequireLogin={() => setShowLogin(true)} />
+
+                <span className={`text-xs px-2 py-1 rounded ${speech.isRecording ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`}>
+                  {speech.supported ? (speech.isRecording ? 'Listening…' : 'Voice ready') : 'Voice N/A'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                  className="text-xs px-3 py-1 rounded border bg-gray-100 hover:bg-gray-200 border-gray-300
+                             dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-700 dark:text-gray-100"
+                >
+                  {theme === 'dark' ? 'Light' : 'Dark'}
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleMetrics}
+                  className="text-xs px-3 py-1 rounded border bg-gray-100 hover:bg-gray-200 border-gray-300
+                             dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-700 dark:text-gray-100"
+                >
+                  {showMetrics ? 'Hide Metrics' : 'Show Metrics'}
+                </button>
+              </div>
+            </div>
+
+            {/* Metrics widget */}
+            {showMetrics && (
+              <div className="rounded-xl border border-gray-200 p-4 bg-gray-50 dark:bg-gray-800 dark:border-gray-700">
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-lg font-semibold dark:text-gray-100">Metrics</h2>
+                  {metricsLoading && <span className="text-xs text-gray-500 dark:text-gray-400">Loading…</span>}
+                </div>
+                {metricsError ? (
+                  <div className="text-sm text-red-600">{metricsError}</div>
+                ) : !metrics ? (
+                  <div className="text-sm text-gray-600 dark:text-gray-300">No data yet. Click “Show Metrics”.</div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <Stat title="Total events" value={metrics.total_events} />
+                      <Stat title="SQL attempts" value={metrics.sql_attempts} />
+                      <Stat title="SQL success" value={metrics.sql_success} />
+                      <Stat title="Success rate" value={`${metrics.sql_success_rate_pct}%`} />
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                      <Stat title="Avg exec time (success)" value={metrics.avg_exec_ms_success == null ? '—' : `${Math.round(metrics.avg_exec_ms_success)} ms`} />
+                      <div className="rounded-lg p-3 bg-white border border-gray-200 dark:bg-gray-900 dark:border-gray-700">
+                        <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">Type breakdown</div>
+                        {metrics.type_breakdown && Object.keys(metrics.type_breakdown).length ? (
+                          <ul className="text-sm dark:text-gray-100">
+                            {Object.entries(metrics.type_breakdown).map(([k, v]) => (
+                              <li key={k} className="flex justify-between">
+                                <span className="capitalize">{k}</span>
+                                <span className="font-medium">{v}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (<div className="text-sm text-gray-500 dark:text-gray-400">No data</div>)}
+                      </div>
+                    </div>
+                    {metrics.per_db && Object.keys(metrics.per_db).length > 0 && (
+                      <div className="rounded-lg p-3 bg-white border border-gray-200 mt-3 dark:bg-gray-900 dark:border-gray-700">
+                        <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">Per DB</div>
                         <ul className="text-sm dark:text-gray-100">
-                          {Object.entries(metrics.type_breakdown).map(([k, v]) => (
-                            <li key={k} className="flex justify-between">
-                              <span className="capitalize">{k}</span>
-                              <span className="font-medium">{v}</span>
+                          {Object.entries(metrics.per_db).map(([db, d]) => (
+                            <li key={db} className="flex justify-between">
+                              <span>{db}</span>
+                              <span>{d.sql_success}/{d.sql_attempts} success</span>
                             </li>
                           ))}
                         </ul>
-                      ) : (<div className="text-sm text-gray-500 dark:text-gray-400">No data</div>)}
-                    </div>
-                  </div>
-                  {metrics.per_db && Object.keys(metrics.per_db).length > 0 && (
-                    <div className="rounded-lg p-3 bg-white border border-gray-200 mt-3 dark:bg-gray-900 dark:border-gray-700">
-                      <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">Per DB</div>
-                      <ul className="text-sm dark:text-gray-100">
-                        {Object.entries(metrics.per_db).map(([db, d]) => (
-                          <li key={db} className="flex justify-between">
-                            <span>{db}</span>
-                            <span>{d.sql_success}/{d.sql_attempts} success</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
 
-          {/* Conversation */}
-          <div className="max-h-[60vh] overflow-y-auto space-y-4">
-            {conversation.map((msg, i) => (
-              <div key={msg.id || i} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`${msg.type === 'user' ? 'max-w-[80%]' : 'w-full'} p-4 rounded-2xl shadow ${
-                  msg.type === 'user'
-                    ? 'bg-blue-600 text-white rounded-br-none'
-                    : 'bg-gray-100 text-gray-900 rounded-bl-none dark:bg-gray-800 dark:text-gray-100'
-                }`}>
+            {/* Conversation */}
+            <div className="max-h-[60vh] overflow-y-auto space-y-4">
+              {conversation.map((msg, i) => (
+                <div key={msg.id || i} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`${msg.type === 'user' ? 'max-w-[80%]' : 'w-full'} p-4 rounded-2xl shadow ${
+                    msg.type === 'user'
+                      ? 'bg-blue-600 text-white rounded-br-none'
+                      : 'bg-gray-100 text-gray-900 rounded-bl-none dark:bg-gray-800 dark:text-gray-100'
+                  }`}>
 
-                  {msg.type === 'user' ? (
-                    <div><strong>You:</strong> {msg.content}</div>
-                  ) : msg.error ? (
-                    <>
-                      <div className="text-red-500"><strong>⚠️ Error:</strong> {msg.error}</div>
-                      {msg.sql && (
-                        <>
-                          <div className="text-xs text-gray-500 mt-2 dark:text-gray-400">SQL (attempted):</div>
-                          <pre className="bg-white p-2 rounded text-xs overflow-x-auto dark:bg-gray-900 dark:border dark:border-gray-800">
-                            {msg.sql}
-                          </pre>
-                        </>
-                      )}
-                    </>
-                  ) : msg.reply ? (
-                    <>
-                      <div><strong>🤖:</strong> {msg.reply}</div>
-                      <FeedbackRow msg={msg} onUp={() => sendFeedback(msg.id, 1)} onDown={() => sendFeedback(msg.id, -1)} />
-                    </>
-                  ) : (
-                    <div>
-                      <div className="text-xs text-gray-500 mb-1 dark:text-gray-400">🤖 SQL:</div>
-                      <pre className="bg-white p-2 rounded text-xs overflow-x-auto dark:bg-gray-900 dark:border dark:border-gray-800">
-                        {msg.sql}
-                      </pre>
+                    {msg.type === 'user' ? (
+                      <div><strong>You:</strong> {msg.content}</div>
+                    ) : msg.error ? (
+                      <>
+                        <div className="text-red-500"><strong>⚠️ Error:</strong> {msg.error}</div>
+                        {msg.sql && (
+                          <>
+                            <div className="text-xs text-gray-500 mt-2 dark:text-gray-400">SQL (attempted):</div>
+                            <pre className="bg-white p-2 rounded text-xs overflow-x-auto dark:bg-gray-900 dark:border dark:border-gray-800">
+                              {msg.sql}
+                            </pre>
+                          </>
+                        )}
+                      </>
+                    ) : msg.reply ? (
+                      <>
+                        <div><strong>🤖:</strong> {msg.reply}</div>
+                        <FeedbackRow msg={msg} onUp={() => sendFeedback(msg.id, 1)} onDown={() => sendFeedback(msg.id, -1)} />
+                      </>
+                    ) : (
+                      <div>
+                        <div className="text-xs text-gray-500 mb-1 dark:text-gray-400">🤖 SQL:</div>
+                        <pre className="bg-white p-2 rounded text-xs overflow-x-auto dark:bg-gray-900 dark:border dark:border-gray-800">
+                          {msg.sql}
+                        </pre>
 
-                      {(!msg.results || msg.results.length === 0) ? (
-                        <p className="text-sm italic text-gray-500 dark:text-gray-400">No results found.</p>
-                      ) : (
-                        <>
-                          <div className="w-full overflow-x-auto">
-                            <table className="min-w-full text-sm mt-2 border border-black dark:border-gray-700 dark:text-gray-100">
-                              <thead className="sticky top-0 z-10">
-                                <tr>
-                                  {Object.keys(msg.results[0]).map((col, idx) => (
-                                    <th
-                                      key={idx}
-                                      className="border border-black px-2 py-1 bg-gray-100 dark:bg-gray-800 dark:border-gray-700"
-                                    >
-                                      {col === 'name' ? 'Product' :
-                                      col === 'revenue' ? 'Revenue (RM)' :
-                                      col === 'total_sales' ? 'Quantity Sold' :
-                                      col === 'branch_name' ? 'Branch' :
-                                      col === 'region' ? 'Region' :
-                                      col}
-                                    </th>
-                                  ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {msg.results.map((row, rowIdx) => (
-                                  <tr key={rowIdx}>
-                                    {Object.entries(row).map(([key, val], colIdx) => (
-                                      <td
-                                        key={colIdx}
-                                        className="border border-black px-2 py-1 dark:border-gray-700"
+                        {(!msg.results || msg.results.length === 0) ? (
+                          <p className="text-sm italic text-gray-500 dark:text-gray-400">No results found.</p>
+                        ) : (
+                          <>
+                            <div className="w-full overflow-x-auto">
+                              <table className="min-w-full text-sm mt-2 border border-black dark:border-gray-700 dark:text-gray-100">
+                                <thead className="sticky top-0 z-10">
+                                  <tr>
+                                    {Object.keys(msg.results[0]).map((col, idx) => (
+                                      <th
+                                        key={idx}
+                                        className="border border-black px-2 py-1 bg-gray-100 dark:bg-gray-800 dark:border-gray-700"
                                       >
-                                        {String(val)}
-                                      </td>
+                                        {col === 'name' ? 'Product' :
+                                        col === 'revenue' ? 'Revenue (RM)' :
+                                        col === 'total_sales' ? 'Quantity Sold' :
+                                        col === 'branch_name' ? 'Branch' :
+                                        col === 'region' ? 'Region' :
+                                        col}
+                                      </th>
                                     ))}
                                   </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
+                                </thead>
+                                <tbody>
+                                  {msg.results.map((row, rowIdx) => (
+                                    <tr key={rowIdx}>
+                                      {Object.entries(row).map(([key, val], colIdx) => (
+                                        <td
+                                          key={colIdx}
+                                          className="border border-black px-2 py-1 dark:border-gray-700"
+                                        >
+                                          {Number.isFinite(toNumber(val)) ? formatNumber(val) : String(val)}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
 
-
-                          {msg.chartTitle && (
-                            <div className="mt-4 text-center font-semibold dark:text-gray-100">{msg.chartTitle}</div>
-                          )}
-
-                          <div className="mt-2" key={`chart-${msg.id || i}`}>
-                            {renderChart(
-                              msg.results,
-                              Object.keys(msg.results[0])[0],
-                              Object.keys(msg.results[0])[1],
-                              msg.chartType || 'bar',
-                              msg.chartColor || '#3b82f6',
-                              msg.xLabel || '',
-                              msg.yLabel || ''
+                            {msg.chartTitle && (
+                              <div className="mt-4 text-center font-semibold dark:text-gray-100">{msg.chartTitle}</div>
                             )}
-                          </div>
 
-                          <FeedbackRow msg={msg} onUp={() => sendFeedback(msg.id, 1)} onDown={() => sendFeedback(msg.id, -1)} />
-                        </>
-                      )}
-                    </div>
-                  )}
+                            <div className="mt-2" key={`chart-${msg.id || i}`}>
+                              {renderChart(
+                                msg.results,
+                                Object.keys(msg.results[0])[0],
+                                Object.keys(msg.results[0])[1],
+                                msg.chartType || 'bar',
+                                msg.chartColor || '#3b82f6',
+                                msg.xLabel || '',
+                                msg.yLabel || ''
+                              )}
+                            </div>
+
+                            <FeedbackRow msg={msg} onUp={() => sendFeedback(msg.id, 1)} onDown={() => sendFeedback(msg.id, -1)} />
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
-            {loading && <div className="text-center text-gray-600 italic dark:text-gray-300">🤖 GPT is thinking...</div>}
-            <div ref={messagesEndRef} />
-          </div>
-
-          {/* Input */}
-          <form onSubmit={handleSubmit} className="flex gap-2 pt-2 items-center">
-            <div className="relative flex-1">
-              <input
-                id="nl-input"
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                disabled={loading}
-                placeholder={speech.isRecording && speech.interim ? `🎤 ${speech.interim}` : "Ask: 'revenue per month by branch', 'sales by category', 'switch to dark mode'"}
-                className="w-full border border-gray-300 rounded-lg px-4 py-2 pr-10
-                           bg-white text-gray-900 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-100 disabled:opacity-60"
-              />
-              {/* Mic button */}
-              <button
-                type="button"
-                onClick={speech.supported ? speech.toggle : undefined}
-                disabled={!speech.supported}
-                title={speech.supported ? (speech.isRecording ? 'Stop voice (Ctrl/⌘+Space)' : 'Start voice (Ctrl/⌘+Space)') : 'Web Speech not supported'}
-                className={`absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-sm rounded
-                  ${speech.supported
-                    ? (speech.isRecording
-                      ? 'bg-red-600 text-white hover:bg-red-700'
-                      : 'bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-100')
-                    : 'bg-gray-200 text-gray-400 cursor-not-allowed dark:bg-gray-700'}`}
-              >
-                {speech.isRecording ? '■' : '🎤'}
-              </button>
+              ))}
+              {loading && <div className="text-center text-gray-600 italic dark:text-gray-300">🤖 GPT is thinking...</div>}
+              <div ref={messagesEndRef} />
             </div>
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700
-                         dark:bg-blue-500 dark:hover:bg-blue-600"
-            >
-              {loading ? 'Thinking...' : 'Ask GPT'}
-            </button>
-          </form>
-        </div>
-      </main>
+            {/* Input */}
+            <form onSubmit={handleSubmit} className="flex gap-2 pt-2 items-center">
+              <div className="relative flex-1">
+                <input
+                  id="nl-input"
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  disabled={loading}
+                  placeholder={speech.isRecording && speech.interim ? `🎤 ${speech.interim}` : "Ask: 'revenue per month by branch', 'sales by category', 'switch to dark mode'"}
+                  className="w-full border border-gray-300 rounded-lg px-4 py-2 pr-10
+                             bg-white text-gray-900 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-100 disabled:opacity-60"
+                />
+                {/* Mic button */}
+                <button
+                  type="button"
+                  onClick={speech.supported ? speech.toggle : undefined}
+                  disabled={!speech.supported}
+                  title={speech.supported ? (speech.isRecording ? 'Stop voice (Ctrl/⌘+Space)' : 'Start voice (Ctrl/⌘+Space)') : 'Web Speech not supported'}
+                  className={`absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-sm rounded
+                    ${speech.supported
+                      ? (speech.isRecording
+                        ? 'bg-red-600 text-white hover:bg-red-700'
+                        : 'bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-100')
+                      : 'bg-gray-200 text-gray-400 cursor-not-allowed dark:bg-gray-700'}`}
+                >
+                  {speech.isRecording ? '■' : '🎤'}
+                </button>
+              </div>
 
-      {/* Login Modal (NEW) */}
-      <LoginModal open={showLogin} onClose={() => setShowLogin(false)} onSuccess={() => setShowLogin(false)} />
-    </div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700
+                           dark:bg-blue-500 dark:hover:bg-blue-600"
+              >
+                {loading ? 'Thinking...' : 'Ask GPT'}
+              </button>
+            </form>
+          </div>
+        </main>
+
+        {/* Login Modal (NEW) */}
+        <LoginModal open={showLogin} onClose={() => setShowLogin(false)} onSuccess={() => setShowLogin(false)} />
+      </div>
+    </ErrorBoundary>
   );
 }
 
