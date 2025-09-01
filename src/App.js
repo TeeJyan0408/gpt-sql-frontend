@@ -167,14 +167,23 @@ function pivotData(rows, xKey, seriesKey, yKey) {
   const xSet = new Set();
   const seriesSet = new Set();
   const map = new Map();
+
   rows.forEach(r => {
-    const x = r[xKey];
-    const s = r[seriesKey];
-    const v = toNumber(r[yKey]);
+    const rawX = r?.[xKey];
+    const rawS = r?.[seriesKey];
+
+    // Guard/normalize keys
+    const x = (rawX == null || rawX === '') ? 'Unknown' : String(rawX);
+    const s = (rawS == null || rawS === '') ? 'Unknown' : String(rawS);
+
+    const v = toNumber(r?.[yKey]);
     if (!map.has(x)) map.set(x, { [xKey]: x });
     map.get(x)[s] = Number.isFinite(v) ? v : 0;
-    xSet.add(x); seriesSet.add(s);
+
+    xSet.add(x);
+    seriesSet.add(s);
   });
+
   const xs = Array.from(xSet);
   xs.sort((a, b) => {
     const ia = monthIndex(String(a));
@@ -184,8 +193,10 @@ function pivotData(rows, xKey, seriesKey, yKey) {
     if (Number.isFinite(ib)) return 1;
     return String(a).localeCompare(String(b));
   });
+
   return { data: xs.map(x => map.get(x)), series: Array.from(seriesSet) };
 }
+
 
 /* ───────── Feedback UI ───────── */
 function FeedbackButtons({ disabled, onUp, onDown }) {
@@ -606,6 +617,10 @@ export default function App() {
   /* ───────── Chart Renderer ───────── */
   const renderChart = (data, xKey, yKey, type, color, xLabel, yLabel) => {
     const { xKey: rx, seriesKey, yKey: ry, isMulti } = resolveAxes(data);
+    // Fast guard: if we couldn't resolve keys, avoid crashing the UI.
+    if (!rx || !ry) {
+      return <div className="text-sm text-red-600">Unable to resolve chart axes from the result.</div>;
+    }
 
     if (isMulti) {
       const { data: wide, series } = pivotData(data, rx, seriesKey, ry);
@@ -676,6 +691,12 @@ export default function App() {
 
     // Single-series
     const ex = xKey || rx, ey = yKey || ry;
+    // Fast guard: if we couldn't resolve keys, avoid crashing the UI.
+    if (!ex || !ey) {
+      return <div className="text-sm text-red-600">Chart columns not detected.</div>;
+    }
+
+
     switch (type) {
       case 'bar':
         return (
@@ -698,10 +719,11 @@ export default function App() {
               <XAxis dataKey={ex} angle={-30} textAnchor="end" interval={0} />
               <YAxis />
               <Tooltip />
-              <Line dataKey={ey} stroke={color} strokeWidth={2} />
+              <Line type="monotone" dataKey={ey} stroke={color} strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
         );
+
       case 'pie':
         return (
           <ResponsiveContainer width="100%" height={360}>
