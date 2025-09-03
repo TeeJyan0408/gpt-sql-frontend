@@ -90,8 +90,17 @@ const toNumber = (v) => {
   return NaN;
 };
 
-// Simple number guard used by formatters/components
-const isNumber = (v) => typeof v === 'number' && Number.isFinite(v);
+// Add this helper near the top with other helpers
+const isNumber = (v) => {
+  if (typeof v === 'number') return Number.isFinite(v);
+  if (typeof v === 'string') {
+    const cleaned = v.replace(/[^\d.,-]/g, '').replace(/\s+/g, '').replace(/,/g, '');
+    const n = Number(cleaned);
+    return Number.isFinite(n);
+  }
+  return false;
+};
+
 
 
 // Pretty number formatting (2 decimals max)
